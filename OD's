@@ -1,0 +1,498 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Mar 14 11:05:37 2025
+
+@author: pablo
+"""
+
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Mar 14 09:48:15 2025
+
+@author: pablo
+"""
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Local Ontological Differentiation (OD)
+
+This script performs ontological differentiation on a local definitions file 
+("extracted_definitions.txt"). Each line in the file should be formatted as:
+    word: token1 token2 token3 ...
+The script builds a dictionary mapping each word (head) to its definition tokens,
+then performs differentiation using:
+  - Great Differentiation (GD)
+  - Optimized Weak Differentiation (WD) with parent tracking
+  - Optimized Strong Differentiation (SD) with parent tracking
+
+It reconstructs sample inner paths, computes outer paths (unless max level is reached 
+without termination), and writes a detailed log of the results to "od_results.txt".
+
+Seeds (the two words to differentiate) are provided in the code. All processing 
+is done offline using the local definitions. All keys and seeds are converted to lowercase.
+"""
+
+import os
+import re
+from collections import Counter
+from tqdm import tqdm
+
+DEBUG = False
+
+def debug_log(message):
+    if DEBUG:
+        print(message)
+
+def read_local_definitions(file_path):
+    """
+    Reads the local extracted definitions file and returns a dictionary mapping
+    each word (head) to its definition tokens (as a list).
+    Expected format per line: "word: token1 token2 token3 ..."
+    All words are converted to lowercase.
+    """
+    definitions = {}
+    with open(file_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or ":" not in line:
+                continue
+            head, def_text = line.split(":", 1)
+            head = head.strip().lower()  # force lowercase for consistency
+            tokens = def_text.strip().split()
+            if tokens:
+                definitions[head] = tokens
+    return definitions
+
+# ===============================
+# Ontological Differentiation Module
+# ===============================
+
+def process_great_differentiation(set_word_a, set_word_b, sets_dict, max_level=10000):
+    repeated_sets = set()
+    uncanceled_sets = set()
+    opened_sets = set()
+    level = 0
+    steps_output = []
+    
+    # Level 0: initialize with seeds.
+    initial_sets = [set_word_a, set_word_b]
+    new_elements_in_iteration = set(initial_sets)
+    for element in initial_sets:
+        if element in repeated_sets or element in uncanceled_sets:
+            repeated_sets.add(element)
+            uncanceled_sets.discard(element)
+        else:
+            uncanceled_sets.add(element)
+    steps_output.append(f"Level {level}:")
+    steps_output.append(f"Uncanceled sets: {uncanceled_sets}")
+    steps_output.append(f"Repeated sets: {repeated_sets}")
+    steps_output.append('')
+    
+    elements_to_open_next = new_elements_in_iteration.copy()
+    level += 1
+    while level <= max_level:
+        current_level_uncanceled = set()
+        new_elements_in_iteration = set()
+        for set_word in elements_to_open_next:
+            opened_sets.add(set_word)
+            related_words = sets_dict.get(set_word, [])
+            for word in related_words:
+                if word in repeated_sets or word in uncanceled_sets:
+                    repeated_sets.add(word)
+                    uncanceled_sets.discard(word)
+                elif word in new_elements_in_iteration:
+                    repeated_sets.add(word)
+                    current_level_uncanceled.discard(word)
+                else:
+                    new_elements_in_iteration.add(word)
+                    current_level_uncanceled.add(word)
+        uncanceled_sets.update(current_level_uncanceled)
+        steps_output.append(f"Level {level}:")
+        steps_output.append(f"New elements in iteration: {new_elements_in_iteration}")
+        steps_output.append(f"Current level uncanceled: {current_level_uncanceled}")
+        steps_output.append(f"Uncanceled sets: {uncanceled_sets}")
+        steps_output.append(f"Repeated sets: {repeated_sets}")
+        steps_output.append('')
+        elements_to_open_next = new_elements_in_iteration.copy()
+        if not new_elements_in_iteration:
+            steps_output.append(f"Termination condition met at Level {level} because no new elements were found.")
+            steps_output.append('')
+            break
+        level += 1
+    output_text = '\n'.join(steps_output)
+    return level, output_text
+
+def check_any_U_empty(U):
+    empty_U_sides_levels = [(lvl, s) for (lvl, s) in U if not U[(lvl, s)]]
+    return empty_U_sides_levels
+
+def calculate_total_points(R):
+    total_points = 0
+    for (level, side), elements in R.items():
+        for elem, count in elements.items():
+            total_points += count * level
+    return total_points
+
+def log_current_state(steps_output, U, R, level, sides):
+    if level not in steps_output:
+        steps_output[level] = {}
+    for side in sides:
+        U_elements = list(U[(level, side)].keys())
+        R_elements = dict(R[(level, side)])
+        steps_output[level][(level, side)] = (U_elements, R_elements)
+
+def save_outputs(steps_output):
+    output_lines = []
+    levels = sorted([key for key in steps_output.keys() if isinstance(key, int)])
+    for level in levels:
+        output_lines.append(f"Level {level}:")
+        for side in [1, 2]:
+            U_elements, R_elements = steps_output[level][(level, side)]
+            output_lines.append(f"Side {side} - U_{level}_{side}: {U_elements}, R_{level}_{side}: {R_elements}")
+        output_lines.append('')
+    if 'Termination' in steps_output:
+        output_lines.append(steps_output['Termination'])
+    if 'Additional Info' in steps_output:
+        output_lines.append(steps_output['Additional Info'])
+    if 'Total Points' in steps_output:
+        output_lines.append(steps_output['Total Points'])
+    return "\n".join(output_lines)
+
+# --- New WD repetition check using expansion sets E ---
+def check_repetition_WD(E, U, R, current_level, steps_output):
+    # Compute the global union of expansion sets E_0^1, E_0^2, ..., E_current_level^1, E_current_level^2
+    globalE = Counter()
+    for lvl in range(0, current_level + 1):
+        for side in [1, 2]:
+            if (lvl, side) in E:
+                globalE += E[(lvl, side)]
+    # For each level m (0..current_level) and side, if an element u in U has global count > 1, move it.
+    for m in range(0, current_level + 1):
+        for side in [1, 2]:
+            for u in list(U[(m, side)].keys()):
+                if globalE[u] > 1:
+                    count = U[(m, side)].pop(u)
+                    R[(m, side)][u] += count
+                    log_current_state(steps_output, U, R, m, [side])
+
+# --- New SD repetition check using expansion sets E ---
+def check_repetition_SD(E, U, R, current_level, steps_output):
+    # For side 1, compute union of all E for side 2 (levels 0..current_level)
+    global_opp_1 = Counter()
+    for lvl in range(0, current_level + 1):
+        if (lvl, 2) in E:
+            global_opp_1 += E[(lvl, 2)]
+    # For side 2, compute union of all E for side 1 (levels 0..current_level)
+    global_opp_2 = Counter()
+    for lvl in range(0, current_level + 1):
+        if (lvl, 1) in E:
+            global_opp_2 += E[(lvl, 1)]
+    # For each level m (0..current_level) and side, check using only the opposite side
+    for m in range(0, current_level + 1):
+        for side in [1, 2]:
+            for u in list(U[(m, side)].keys()):
+                if side == 1:
+                    if global_opp_1[u] > 0:
+                        count = U[(m, side)].pop(u)
+                        R[(m, side)][u] += count
+                        log_current_state(steps_output, U, R, m, [side])
+                else:  # side == 2
+                    if global_opp_2[u] > 0:
+                        count = U[(m, side)].pop(u)
+                        R[(m, side)][u] += count
+                        log_current_state(steps_output, U, R, m, [side])
+
+# --- Optimized Weak Differentiation (WD) with parent tracking ---
+def process_optimized_weak_differentiation_with_paths(set_word_a, set_word_b, sets_dict, max_level=10000):
+    # Dictionaries for expansion sets E, unique sets U and repeated sets R.
+    E = {}  # E[(n, side)] holds the expansion set at level n for side
+    U = {}  # U[(n, side)] holds the unflagged elements (copy of E initially, then pruned)
+    R = {}  # R[(n, side)] holds repeated elements detected at that level
+    steps_output = {}
+    sides = [1, 2]
+    wd_parent_map = {}
+    
+    # Level 0: seeds
+    E[(0, 1)] = Counter([set_word_a])
+    E[(0, 2)] = Counter([set_word_b])
+    for side in sides:
+        U[(0, side)] = E[(0, side)].copy()
+        R[(0, side)] = Counter()
+    wd_parent_map[(0, 1, set_word_a)] = None
+    wd_parent_map[(0, 2, set_word_b)] = None
+
+    # Check repetition at level 0 (should catch if a seed is repeated globally)
+    check_repetition_WD(E, U, R, 0, steps_output)
+    log_current_state(steps_output, U, R, 0, sides)
+    if check_any_U_empty(U):
+        empty_U_info = ', '.join([f"U_{lvl}_{s}" for lvl, s in check_any_U_empty(U)])
+        steps_output['Termination'] = f"Termination at Level 0 because {empty_U_info} became empty."
+        total_points = calculate_total_points(R)
+        steps_output['Total Points'] = f"Total points: {total_points}"
+        output_text = save_outputs(steps_output)
+        return total_points, output_text, wd_parent_map
+
+    # Process levels 1 to max_level:
+    for level in range(1, max_level + 1):
+        # Compute expansion sets E[(level, side)] from E[(level-1, side)]
+        for side in sides:
+            E[(level, side)] = Counter()
+            # Expand using the previous level's expansion set E[(level-1, side)]
+            for elem, count in E[(level - 1, side)].items():
+                expansions = sets_dict.get(elem, [elem])
+                for e in expansions:
+                    E[(level, side)][e] += count
+                    key = (level, side, e)
+                    if key not in wd_parent_map:
+                        wd_parent_map[key] = (level - 1, side, elem)
+        # Initialize U and R for the current level:
+        for side in sides:
+            U[(level, side)] = E[(level, side)].copy()
+            R[(level, side)] = Counter()
+        # Now perform the WD repetition check using the union over levels 0..level
+        check_repetition_WD(E, U, R, level, steps_output)
+        log_current_state(steps_output, U, R, level, sides)
+        if check_any_U_empty(U):
+            empty_U_info = ', '.join([f"U_{lvl}_{s}" for lvl, s in check_any_U_empty(U)])
+            steps_output['Termination'] = f"Termination at Level {level} because {empty_U_info} became empty."
+            total_points = calculate_total_points(R)
+            steps_output['Total Points'] = f"Total points: {total_points}"
+            output_text = save_outputs(steps_output)
+            return total_points, output_text, wd_parent_map
+
+    # Reached max level without termination:
+    total_points = calculate_total_points(R)
+    # Determine the level (apart from level 0) with the minimum number of U elements:
+    min_level = None
+    min_count = None
+    for lvl in range(1, max_level + 1):
+        if (lvl, 1) in U and (lvl, 2) in U:
+            count = len(U[(lvl, 1)]) + len(U[(lvl, 2)])
+            if min_count is None or count < min_count:
+                min_count = count
+                min_level = lvl
+
+    steps_output['Additional Info'] = (
+        f"No ontological completeness for WD between {set_word_a} and {set_word_b}. "
+        f"Level with minimum U sets: {min_level} with {min_count} elements."
+    )
+    steps_output['Termination'] = f"Reached max level {max_level} without termination."
+    steps_output['Total Points'] = f"Total points: {total_points}"
+    output_text = save_outputs(steps_output)
+    return total_points, output_text, wd_parent_map
+
+# --- Optimized Strong Differentiation (SD) with parent tracking ---
+def process_optimized_strong_differentiation_with_paths(set_word_a, set_word_b, sets_dict, max_level=10000):
+    E = {}
+    U = {}
+    R = {}
+    steps_output = {}
+    sides = [1, 2]
+    sd_parent_map = {}
+    # Level 0: seeds
+    E[(0, 1)] = Counter([set_word_a])
+    E[(0, 2)] = Counter([set_word_b])
+    for side in sides:
+        U[(0, side)] = E[(0, side)].copy()
+        R[(0, side)] = Counter()
+    sd_parent_map[(0, 1, set_word_a)] = None
+    sd_parent_map[(0, 2, set_word_b)] = None
+
+    # Check repetition for SD at level 0
+    check_repetition_SD(E, U, R, 0, steps_output)
+    log_current_state(steps_output, U, R, 0, sides)
+    if check_any_U_empty(U):
+        empty_U_info = ', '.join([f"U_{lvl}_{s}" for lvl, s in check_any_U_empty(U)])
+        total_points = calculate_total_points(R)
+        steps_output['Termination'] = f"Termination at Level 0 because {empty_U_info} became empty."
+        steps_output['Total Points'] = f"Total points: {total_points}"
+        output_text = save_outputs(steps_output)
+        return total_points, output_text, sd_parent_map
+    # Process levels 1 to max_level:
+    for level in range(1, max_level + 1):
+        # Compute expansion sets for current level
+        for side in sides:
+            E[(level, side)] = Counter()
+            for elem, count in E[(level - 1, side)].items():
+                expansions = sets_dict.get(elem, [elem])
+                for e in expansions:
+                    E[(level, side)][e] += count
+                    key = (level, side, e)
+                    if key not in sd_parent_map:
+                        sd_parent_map[key] = (level - 1, side, elem)
+        # Initialize U and R for current level:
+        for side in sides:
+            U[(level, side)] = E[(level, side)].copy()
+            R[(level, side)] = Counter()
+        # Perform SD repetition check using the opposite side's expansions
+        check_repetition_SD(E, U, R, level, steps_output)
+        log_current_state(steps_output, U, R, level, sides)
+        if check_any_U_empty(U):
+            empty_U_info = ', '.join([f"U_{lvl}_{s}" for lvl, s in check_any_U_empty(U)])
+            total_points = calculate_total_points(R)
+            steps_output['Termination'] = f"Termination at Level {level} because {empty_U_info} became empty."
+            steps_output['Total Points'] = f"Total points: {total_points}"
+            output_text = save_outputs(steps_output)
+            return total_points, output_text, sd_parent_map
+    total_points = calculate_total_points(R)
+    # Compute the level with the fewest U elements (excluding U 0)
+    min_level = None
+    min_count = None
+    for lvl in range(1, max_level + 1):
+        if (lvl, 1) in U and (lvl, 2) in U:
+            count = len(U[(lvl, 1)]) + len(U[(lvl, 2)])
+            if min_count is None or count < min_count:
+                min_count = count
+                min_level = lvl
+
+    steps_output['Additional Info'] = (
+        f"No ontological completeness for SD between {set_word_a} and {set_word_b}. "
+        f"Level with minimum U sets: {min_level} with {min_count} elements."
+    )
+    steps_output['Termination'] = f"Reached max level {max_level} without termination."
+    steps_output['Total Points'] = f"Total points: {total_points}"
+    output_text = save_outputs(steps_output)
+    return total_points, output_text, sd_parent_map
+
+def get_inner_path(parent_map, key):
+    path = [key]
+    current = key
+    while parent_map.get(current) is not None:
+        parent = parent_map[current]
+        path.append(parent)
+        current = parent
+    return list(reversed(path))
+
+def compute_outer_paths(parent_map, set_word_a, set_word_b):
+    paths_a = {}
+    paths_b = {}
+    for key in parent_map:
+        level, side, word = key
+        inner = get_inner_path(parent_map, key)
+        seed_word = inner[0][2]
+        if seed_word == set_word_a and side == 1:
+            paths_a[key] = inner
+        elif seed_word == set_word_b and side == 2:
+            paths_b[key] = inner
+    outer_paths = []
+    for keyA, innerA in paths_a.items():
+        for keyB, innerB in paths_b.items():
+            seqA = [k[2] for k in innerA]
+            seqB = [k[2] for k in innerB]
+            common = set(seqA) & set(seqB)
+            if common:
+                for common_word in common:
+                    i = seqA.index(common_word)
+                    j = seqB.index(common_word)
+                    fused = seqA[:i+1] + list(reversed(seqB[:j]))
+                    outer_paths.append(fused)
+    unique_outer_paths = []
+    seen = set()
+    for path in outer_paths:
+        tup = tuple(path)
+        if tup not in seen:
+            seen.add(tup)
+            unique_outer_paths.append(path)
+    return unique_outer_paths
+
+# ===============================
+# Main OD Function (with lowercase seeds)
+# ===============================
+
+def main():
+    input_file = "extracted_definitions.txt"
+    if not os.path.exists(input_file):
+        print(f"{input_file} not found. Please ensure the file exists.")
+        return
+    definitions = {}
+    with open(input_file, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or ":" not in line:
+                continue
+            word, def_text = line.split(":", 1)
+            # Force keys to lowercase so that capitalized inputs match
+            definitions[word.strip().lower()] = def_text.strip().lower()
+    print(f"Loaded definitions for {len(definitions)} words from {input_file}.")
+
+    sets_dict = {}
+    for word, defn in definitions.items():
+        tokens = defn.split()
+        sets_dict[word] = tokens if tokens else []
+
+    # Convert seed words to lowercase for matching.
+    word_a = "money".lower()   # Seed for side 1
+    word_b = "business".lower()    # Seed for side 2
+    print(f"Running differentiation for '{word_a}' and '{word_b}' using local definitions...")
+
+    print("\nRunning Great Differentiation (GD)...")
+    gd_max_level, gd_output = process_great_differentiation(word_a, word_b, sets_dict)
+    print("Great Differentiation complete.")
+    print(gd_output)
+    print(f"GD determined maximum level: {gd_max_level}")
+
+    print("\nRunning Optimized Weak Differentiation (WD) with parent tracking...")
+    wd_total_points, wd_output, wd_parent_map = process_optimized_weak_differentiation_with_paths(word_a, word_b, sets_dict, max_level=gd_max_level)
+    print("Optimized Weak Differentiation (WD) complete.")
+    print(wd_output)
+    print(f"WD total points: {wd_total_points}")
+
+    # Only compute outer paths for WD if termination was not by max level
+    if "Reached max level" in wd_output:
+        print(f"\nNo ontological completeness for WD between {word_a} and {word_b}. Outer paths computation canceled for WD.")
+    else:
+        print("\nComputing outer paths (WD)...")
+        outer_paths_wd = compute_outer_paths(wd_parent_map, word_a, word_b)
+        print(f"Found {len(outer_paths_wd)} unique outer paths in WD:")
+        for path in outer_paths_wd:
+            print(" -> ".join(path))
+
+    print("\nRunning Optimized Strong Differentiation (SD) with parent tracking...")
+    sd_total_points, sd_output, sd_parent_map = process_optimized_strong_differentiation_with_paths(word_a, word_b, sets_dict, max_level=gd_max_level)
+    print("Optimized Strong Differentiation (SD) complete.")
+    print(sd_output)
+    print(f"SD total points: {sd_total_points}")
+
+    # Only compute outer paths for SD if termination was not by max level
+    if "Reached max level" in sd_output:
+        print(f"\nNo ontological completeness for SD between {word_a} and {word_b}. Outer paths computation canceled for SD.")
+    else:
+        print("\nComputing outer paths (SD)...")
+        outer_paths_sd = compute_outer_paths(sd_parent_map, word_a, word_b)
+        print(f"Found {len(outer_paths_sd)} unique outer paths in SD:")
+        for path in outer_paths_sd:
+            print(" -> ".join(path))
+
+    output_filename = "od_results.txt"
+    with open(output_filename, "w", encoding="utf-8") as f:
+        f.write("Local Ontological Differentiation Results\n")
+        f.write("=========================================\n\n")
+        f.write("Great Differentiation (GD) Output:\n")
+        f.write(gd_output + "\n\n")
+        f.write(f"GD maximum level: {gd_max_level}\n\n")
+        f.write("Optimized Weak Differentiation (WD) Output:\n")
+        f.write(wd_output + "\n\n")
+        f.write(f"WD total points: {wd_total_points}\n\n")
+        f.write("Optimized Strong Differentiation (SD) Output:\n")
+        f.write(sd_output + "\n\n")
+        f.write(f"SD total points: {sd_total_points}\n\n")
+        if "Reached max level" not in wd_output:
+            f.write("Outer paths (WD):\n")
+            for path in outer_paths_wd:
+                f.write(" -> ".join(path) + "\n")
+            f.write("\n")
+        if "Reached max level" not in sd_output:
+            f.write("Outer paths (SD):\n")
+            for path in outer_paths_sd:
+                f.write(" -> ".join(path) + "\n")
+            f.write("\n")
+    print(f"\nResults saved to '{output_filename}'.")
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+        import traceback
+        traceback.print_exc()
