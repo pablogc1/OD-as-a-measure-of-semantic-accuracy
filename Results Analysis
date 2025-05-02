@@ -1,0 +1,421 @@
+#!/usr/bin/env python3
+"""
+process_combined_results_enhanced.py
+
+Aggregates summary results, performs original and log-transformed percentile
+agreement analysis (SD vs Cosine), calculates rank correlation, and generates
+diagnostic plots.
+
+Assumes it's run from an environment where the necessary files and directories
+('results_chunk_*.txt', 'pair_stats_chunk_*/pair_stats_*.txt') are accessible
+relative to the script's working directory after setting it.
+
+Outputs:
+- results_total_summary.txt: Aggregated counts from chunks.
+- percentile_agreement_summary_original.txt: Original percentile stats.
+- percentile_agreement_summary_log_sd.txt: Percentile stats using log(1+SD).
+- rank_correlation_summary.txt: Spearman's Rho for SD vs Cosine.
+- plot_histograms.png: Histograms of SD, log(1+SD), Cosine.
+- plot_scatter_logsd_vs_cosine.png: Scatter plot.
+- plot_histograms_normalized_comparison.png: Overlaid normalized histograms.
+"""
+
+import glob
+import re
+import os
+import sys
+import numpy as np
+from scipy import stats # For Spearman's rho
+import matplotlib.pyplot as plt
+
+# --- Configuration ---
+WORKING_DIRECTORY = r"C:\Users\pablo\OneDrive\Escritorio\Programar" # Raw string for Windows paths
+SUMMARY_FILES_PATTERN = "results_chunk_*.txt"
+PAIR_STATS_FILES_PATTERN = "pair_stats_chunk_*/pair_stats_*.txt"
+TOTAL_SUMMARY_OUTPUT_FILE = "results_total_summary.txt"
+PERCENTILE_ORIGINAL_OUTPUT_FILE = "percentile_agreement_summary_original.txt"
+PERCENTILE_LOG_SD_OUTPUT_FILE = "percentile_agreement_summary_log_sd.txt"
+RANK_CORRELATION_OUTPUT_FILE = "rank_correlation_summary.txt"
+HISTOGRAM_PLOT_FILE = "plot_histograms.png"
+SCATTER_PLOT_FILE = "plot_scatter_logsd_vs_cosine.png"
+NORMALIZED_HIST_COMPARISON_PLOT_FILE = "plot_histograms_normalized_comparison.png"
+NUM_PERCENTILE_BINS = 10
+
+# --- Utility Functions ---
+def normalize_min_max(data_array):
+    """Performs min-max normalization to [0, 1] range."""
+    min_val = data_array.min()
+    max_val = data_array.max()
+    if max_val == min_val:
+        print(f"Warning: All values are identical ({min_val}). Normalizing to 0.5.", file=sys.stderr)
+        # Return array of 0.5s with the same shape
+        return np.full_like(data_array, 0.5, dtype=np.float64)
+    else:
+        return (data_array - min_val) / (max_val - min_val)
+
+def calculate_percentile_agreement(norm_data1, norm_data2, num_bins):
+    """Calculates agreement counts based on normalized data."""
+    if len(norm_data1) != len(norm_data2):
+        raise ValueError("Input arrays must have the same length.")
+    if len(norm_data1) == 0:
+        return 0, np.zeros(num_bins, dtype=int)
+
+    # Calculate bin indices (0 to num_bins-1)
+    indices1 = np.clip((norm_data1 * num_bins).astype(int), 0, num_bins - 1)
+    indices2 = np.clip((norm_data2 * num_bins).astype(int), 0, num_bins - 1)
+
+    # Find pairs where both fall into the same bin
+    agreement_mask = (indices1 == indices2)
+    total_matches = np.sum(agreement_mask)
+
+    # Count matches within each specific bin
+    matches_per_bin = np.zeros(num_bins, dtype=int)
+    for i in range(num_bins):
+        matches_per_bin[i] = np.sum((indices1 == i) & (indices2 == i))
+
+    # Sanity check
+    if total_matches != np.sum(matches_per_bin):
+         print("Warning: Mismatch between total and per-bin agreement counts!", file=sys.stderr)
+
+    return total_matches, matches_per_bin
+
+def format_percentile_output(title, total_pairs, total_matches, matches_per_bin, num_bins):
+    """Formats the percentile agreement results into a string."""
+    if total_pairs == 0:
+        overall_agreement_percentage = 0.0
+    else:
+        overall_agreement_percentage = (total_matches / total_pairs) * 100
+
+    lines = [
+        f"{title}",
+        f"{'=' * len(title)}",
+        f"Total valid pairs analyzed: {total_pairs}",
+        f"Number of percentile bins: {num_bins}\n",
+        f"Total pairs where normalized values fall in the same bin: {total_matches}",
+        f"Overall agreement percentage: {overall_agreement_percentage:.2f}%\n",
+        f"Agreement Counts per Bin:"
+    ]
+
+    bin_edges = np.linspace(0, 1, num_bins + 1)
+    for i in range(num_bins):
+        bin_label = f"[{bin_edges[i]:.1f}-{bin_edges[i+1]:.1f})"
+        if i == num_bins - 1:
+            bin_label = f"[{bin_edges[i]:.1f}-{bin_edges[i+1]:.1f}]" # Last bin inclusive
+
+        bin_percentage = (matches_per_bin[i] / total_pairs) * 100 if total_pairs > 0 else 0.0
+        lines.append(f"  Bin {i} {bin_label}: {matches_per_bin[i]:>10d} pairs ({bin_percentage:>6.2f}%)")
+
+    return "\n".join(lines)
+
+# --- Main Script ---
+
+# 1. Set Working Directory
+print(f"Attempting to change working directory to: {WORKING_DIRECTORY}")
+try:
+    os.chdir(WORKING_DIRECTORY)
+    print(f"Current working directory: {os.getcwd()}")
+except FileNotFoundError:
+    print(f"Error: Directory not found: {WORKING_DIRECTORY}", file=sys.stderr)
+    sys.exit(1)
+except Exception as e:
+    print(f"Error changing directory: {e}", file=sys.stderr)
+    sys.exit(1)
+
+
+# --- Part 1: Aggregate Chunk Summaries ---
+print("\n--- Part 1: Aggregating Chunk Summaries ---")
+# (Same code as before for summary aggregation)
+regex_patterns = {
+    "total_pairs": re.compile(r"Total pairs:?\s*(\d+)"),
+    "invalid": re.compile(r"Invalid:?\s*(\d+)"),
+    "SN_less": re.compile(r"SN\s*<\s*SP:?\s*(\d+)"),
+    "SN_equal": re.compile(r"SN\s*==\s*SP:?\s*(\d+)"),
+    "SN_more": re.compile(r"SN\s*>\s*SP:?\s*(\d+)"),
+    "valid": re.compile(r"Valid:?\s*(\d+)")
+}
+totals = {k: 0 for k in regex_patterns.keys()}
+summary_files = sorted(glob.glob(SUMMARY_FILES_PATTERN))
+files_processed_count = 0
+
+if not summary_files:
+    print(f"Warning: No summary files found matching pattern '{SUMMARY_FILES_PATTERN}'. Skipping Part 1.", file=sys.stderr)
+else:
+    print(f"Found {len(summary_files)} summary files to process.")
+    for filename in summary_files:
+        try:
+            with open(filename, "r", encoding="utf-8") as f:
+                contents = f.read()
+            keys_found_in_file = 0
+            for key, pattern in regex_patterns.items():
+                match = pattern.search(contents)
+                if match:
+                    try:
+                        value = int(match.group(1))
+                        totals[key] += value
+                        keys_found_in_file += 1
+                    except (ValueError, IndexError):
+                         print(f"Warning: Problem extracting value for '{key}' in {filename}. Skipping.", file=sys.stderr)
+                # else: print(f"Warning: Could not extract '{key}' from {filename}", file=sys.stderr) # Optional: reduce noise
+            if keys_found_in_file >= 4: # Heuristic check
+                 files_processed_count += 1
+        except Exception as e:
+            print(f"Error processing summary file {filename}: {e}", file=sys.stderr)
+
+    print(f"Successfully processed data from {files_processed_count} summary files.")
+    if totals["valid"] > 0:
+        pct_SN_less = (totals["SN_less"] / totals["valid"]) * 100
+        pct_SN_equal = (totals["SN_equal"] / totals["valid"]) * 100
+        pct_SN_more = (totals["SN_more"] / totals["valid"]) * 100
+    else:
+        pct_SN_less = pct_SN_equal = pct_SN_more = 0.0
+
+    summary_lines = [
+        "Overall Results Summary (from Chunk Files)",
+        "==========================================",
+        f"Files Processed: {files_processed_count} (matching '{SUMMARY_FILES_PATTERN}')\n",
+        f"Total pairs processed (summed): {totals['total_pairs']}",
+        f"Invalid pairs (summed):         {totals['invalid']}",
+        f"Valid pairs (summed):           {totals['valid']}\n",
+        f"Semantic Navigation SD < Shortest Path SD: {totals['SN_less']:>10d} ({pct_SN_less:>6.2f}%)",
+        f"Semantic Navigation SD == Shortest Path SD: {totals['SN_equal']:>10d} ({pct_SN_equal:>6.2f}%)",
+        f"Semantic Navigation SD > Shortest Path SD: {totals['SN_more']:>10d} ({pct_SN_more:>6.2f}%)"
+    ]
+    summary_text = "\n".join(summary_lines)
+    try:
+        with open(TOTAL_SUMMARY_OUTPUT_FILE, "w", encoding="utf-8") as outf:
+            outf.write(summary_text + "\n")
+        print(f"\nAggregated summary written to {TOTAL_SUMMARY_OUTPUT_FILE}")
+    except IOError as e:
+        print(f"\nError writing summary file {TOTAL_SUMMARY_OUTPUT_FILE}: {e}", file=sys.stderr)
+    print("\n" + summary_text)
+
+
+# --- Part 2: Load Pair Stats Data ---
+print("\n--- Part 2: Loading Pair Stats Data ---")
+all_sd_values = []
+all_cosine_values = []
+pair_stats_files_processed = 0
+total_lines_read = 0
+valid_pairs_read = 0
+
+pair_stats_files = sorted(glob.glob(PAIR_STATS_FILES_PATTERN))
+
+if not pair_stats_files:
+    print(f"Error: No pair stats files found matching pattern '{PAIR_STATS_FILES_PATTERN}'. Cannot perform analysis.", file=sys.stderr)
+    sys.exit(1)
+
+print(f"Found {len(pair_stats_files)} pair stats files to process.")
+for filename in pair_stats_files:
+    try:
+        with open(filename, 'r', encoding='utf-8') as f:
+            header = next(f) # Skip header
+            lines_in_file = 0
+            valid_in_file = 0
+            for line in f:
+                total_lines_read += 1
+                lines_in_file += 1
+                try:
+                    parts = line.strip().split('\t')
+                    if len(parts) >= 4:
+                        sd_val = float(parts[2])
+                        cosine_val = float(parts[3])
+                        all_sd_values.append(sd_val)
+                        all_cosine_values.append(cosine_val)
+                        valid_pairs_read += 1
+                        valid_in_file += 1
+                except (ValueError, IndexError):
+                     print(f"Warning: Skipping problematic line in {filename}: '{line.strip()[:50]}...'", file=sys.stderr) # Concise warning
+        # print(f"  Processed {filename}: Read {lines_in_file} data lines, found {valid_in_file} valid pairs.") # Optional: verbose output
+        pair_stats_files_processed += 1
+    except FileNotFoundError:
+         print(f"Warning: File {filename} not found.", file=sys.stderr)
+    except StopIteration:
+         print(f"Warning: File {filename} might be empty.", file=sys.stderr)
+    except Exception as e:
+         print(f"Error processing file {filename}: {e}", file=sys.stderr)
+
+print(f"\nFinished reading pair stats.")
+print(f"Files processed: {pair_stats_files_processed}")
+print(f"Total valid pairs found: {valid_pairs_read}")
+
+if valid_pairs_read == 0:
+    print("\nError: No valid pairs found in any pair stats file. Cannot perform analysis.", file=sys.stderr)
+    sys.exit(1)
+
+# Convert to NumPy arrays for efficient processing
+sd_array = np.array(all_sd_values, dtype=np.float64)
+cosine_array = np.array(all_cosine_values, dtype=np.float64)
+
+
+# --- Part 3: Original Percentile Agreement Analysis ---
+print("\n--- Part 3: Original Percentile Agreement Analysis (SD vs Cosine) ---")
+print("Normalizing raw SD and Cosine values...")
+norm_sd_original = normalize_min_max(sd_array)
+norm_cosine = normalize_min_max(cosine_array) # Can reuse this normalization later
+
+print("Calculating original percentile agreement...")
+total_matches_orig, matches_per_bin_orig = calculate_percentile_agreement(
+    norm_sd_original, norm_cosine, NUM_PERCENTILE_BINS
+)
+
+percentile_text_orig = format_percentile_output(
+    "Percentile Agreement Analysis (Original SD vs Cosine)",
+    valid_pairs_read, total_matches_orig, matches_per_bin_orig, NUM_PERCENTILE_BINS
+)
+
+try:
+    with open(PERCENTILE_ORIGINAL_OUTPUT_FILE, "w", encoding="utf-8") as outf:
+        outf.write(percentile_text_orig + "\n")
+    print(f"\nOriginal percentile agreement summary written to {PERCENTILE_ORIGINAL_OUTPUT_FILE}")
+except IOError as e:
+    print(f"\nError writing original percentile file: {e}", file=sys.stderr)
+print("\n" + percentile_text_orig)
+
+
+# --- Part 4: Enhanced Analysis (Log Transform & Correlation) ---
+print("\n--- Part 4: Enhanced Analysis (Log Transform & Correlation) ---")
+
+# Log Transform SD
+print("Applying log(1+x) transformation to SD values...")
+# Use log1p for numerical stability and handling SD=0
+log_sd_array = np.log1p(sd_array)
+print(f"Log(1+SD) range: [{log_sd_array.min():.4f}, {log_sd_array.max():.4f}]")
+
+# Log-Transformed Percentile Analysis
+print("Normalizing log(1+SD) and Cosine values...")
+norm_log_sd = normalize_min_max(log_sd_array)
+# norm_cosine is already calculated
+
+print("Calculating log-transformed percentile agreement...")
+total_matches_log, matches_per_bin_log = calculate_percentile_agreement(
+    norm_log_sd, norm_cosine, NUM_PERCENTILE_BINS
+)
+
+percentile_text_log = format_percentile_output(
+    "Percentile Agreement Analysis (Log(1+SD) vs Cosine)",
+    valid_pairs_read, total_matches_log, matches_per_bin_log, NUM_PERCENTILE_BINS
+)
+
+try:
+    with open(PERCENTILE_LOG_SD_OUTPUT_FILE, "w", encoding="utf-8") as outf:
+        outf.write(percentile_text_log + "\n")
+    print(f"\nLog-transformed percentile agreement summary written to {PERCENTILE_LOG_SD_OUTPUT_FILE}")
+except IOError as e:
+    print(f"\nError writing log percentile file: {e}", file=sys.stderr)
+print("\n" + percentile_text_log)
+
+# Rank Correlation
+print("\nCalculating Spearman Rank Correlation (raw SD vs raw Cosine)...")
+try:
+    rho, p_value = stats.spearmanr(sd_array, cosine_array)
+    correlation_text = [
+        "Spearman Rank Correlation (SD vs Cosine)",
+        "========================================",
+        f"Calculated using {valid_pairs_read} valid pairs.",
+        f"Spearman's rho: {rho:.4f}",
+        f"p-value:        {p_value:.4g}" # Use scientific notation if very small
+    ]
+    if p_value < 0.0001:
+        correlation_text[-1] += " (highly significant)"
+    elif p_value < 0.05:
+         correlation_text[-1] += " (significant at p<0.05)"
+    else:
+         correlation_text[-1] += " (not statistically significant at p<0.05)"
+
+    correlation_summary = "\n".join(correlation_text)
+
+    try:
+        with open(RANK_CORRELATION_OUTPUT_FILE, "w", encoding="utf-8") as outf:
+            outf.write(correlation_summary + "\n")
+        print(f"\nRank correlation summary written to {RANK_CORRELATION_OUTPUT_FILE}")
+    except IOError as e:
+        print(f"\nError writing rank correlation file: {e}", file=sys.stderr)
+    print("\n" + correlation_summary)
+
+except Exception as e:
+    print(f"\nError calculating Spearman correlation: {e}", file=sys.stderr)
+
+
+# --- Part 5: Plotting ---
+print("\n--- Part 5: Generating Plots ---")
+
+plt.style.use('seaborn-v0_8-darkgrid') # A decent default style
+
+# Plot 1: Histograms of distributions
+print("Generating histogram plot...")
+try:
+    fig_hist, axes_hist = plt.subplots(1, 3, figsize=(18, 5))
+
+    # Raw SD histogram (likely heavily skewed)
+    axes_hist[0].hist(sd_array, bins=50, color='skyblue', edgecolor='black')
+    axes_hist[0].set_title('Distribution of Raw SD Scores')
+    axes_hist[0].set_xlabel('SD Score')
+    axes_hist[0].set_ylabel('Frequency')
+    # Consider logarithmic y-scale if counts vary wildly, or x-scale if needed
+    axes_hist[0].set_yscale('log')
+    axes_hist[0].ticklabel_format(style='sci', axis='x', scilimits=(0,0)) # Scientific notation for large SD
+
+    # Log(1+SD) histogram (should be better)
+    axes_hist[1].hist(log_sd_array, bins=50, color='lightcoral', edgecolor='black')
+    axes_hist[1].set_title('Distribution of Log(1+SD) Scores')
+    axes_hist[1].set_xlabel('Log(1+SD) Score')
+    axes_hist[1].set_ylabel('Frequency')
+
+    # Cosine histogram
+    axes_hist[2].hist(cosine_array, bins=50, color='lightgreen', edgecolor='black')
+    axes_hist[2].set_title('Distribution of Cosine Similarity')
+    axes_hist[2].set_xlabel('Cosine Similarity')
+    axes_hist[2].set_ylabel('Frequency')
+
+    plt.tight_layout()
+    plt.savefig(HISTOGRAM_PLOT_FILE)
+    plt.close(fig_hist) # Close the figure to free memory
+    print(f"Histogram plot saved to {HISTOGRAM_PLOT_FILE}")
+except Exception as e:
+    print(f"Error generating histogram plot: {e}", file=sys.stderr)
+
+
+# Plot 2: Scatter plot of Log(1+SD) vs Cosine
+print("Generating scatter plot...")
+try:
+    fig_scatter, ax_scatter = plt.subplots(figsize=(8, 7))
+    # Use small points and transparency for large datasets
+    ax_scatter.scatter(log_sd_array, cosine_array, alpha=0.1, s=5, c='blue', edgecolors='none')
+    ax_scatter.set_title('Cosine Similarity vs. Log(1+SD)')
+    ax_scatter.set_xlabel('Log(1+SD) Score')
+    ax_scatter.set_ylabel('Cosine Similarity')
+    ax_scatter.grid(True)
+
+    plt.tight_layout()
+    plt.savefig(SCATTER_PLOT_FILE)
+    plt.close(fig_scatter)
+    print(f"Scatter plot saved to {SCATTER_PLOT_FILE}")
+except Exception as e:
+    print(f"Error generating scatter plot: {e}", file=sys.stderr)
+
+
+# Plot 3: Overlaid histograms of normalized log(1+SD) and normalized Cosine
+print("Generating normalized histogram comparison plot...")
+try:
+    fig_comp, ax_comp = plt.subplots(figsize=(10, 6))
+
+    bins = np.linspace(0, 1, 51) # Use 50 bins between 0 and 1
+
+    ax_comp.hist(norm_log_sd, bins=bins, alpha=0.6, label='Normalized Log(1+SD)', color='coral', density=True)
+    ax_comp.hist(norm_cosine, bins=bins, alpha=0.6, label='Normalized Cosine', color='skyblue', density=True)
+
+    ax_comp.set_title('Comparison of Normalized Distributions')
+    ax_comp.set_xlabel('Normalized Value [0, 1]')
+    ax_comp.set_ylabel('Density') # Use density=True for meaningful comparison of shapes
+    ax_comp.legend()
+    ax_comp.grid(True, axis='y', linestyle=':')
+
+    plt.tight_layout()
+    plt.savefig(NORMALIZED_HIST_COMPARISON_PLOT_FILE)
+    plt.close(fig_comp)
+    print(f"Normalized histogram comparison plot saved to {NORMALIZED_HIST_COMPARISON_PLOT_FILE}")
+except Exception as e:
+    print(f"Error generating comparison histogram plot: {e}", file=sys.stderr)
+
+
+print("\n--- Script Finished ---")
