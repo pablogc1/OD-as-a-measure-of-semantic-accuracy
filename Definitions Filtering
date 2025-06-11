@@ -1,3 +1,12 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Thu Mar 27 21:31:31 2025
+
+@author: pablo
+"""
+
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 Parallel extraction of Wiktionary definitions.
@@ -29,39 +38,42 @@ def debug_log(message):
 
 # Mapping for contraction handling.
 # Tokens mapped to None are dropped.
-CONTRACTIONS = {
-    "hasnt": "have",
-    "wouldnt": "would",
-    "cant": "can",
-    "havent": "have",
-    "wont": "will",
-    "didnt": None,
-    "dont": None,
-    "doesnt": None,
-    "was": None,
-    "were": None,
-    "wasnt": None,
-    "werent": None,
-    "do": None,
-    "about": None,
-    "other": None,
-    "something": None,
-    "like": None,
-    "thing": None,
-    "use": None,
-    "give": None,
-    "take": None,
-    "make": None,
-    "what": None,
-    "come": None,
-    "find": None,
-    "can": None,
-    "how": None,
-    "have": None,
-    "would": None,
-    "will": None,
-    "not": None,
-}
+# MODIFICATION: Emptied the dictionary to disable contraction filtering.
+CONTRACTIONS = {}
+# Original CONTRACTIONS dictionary commented out for reference:
+# CONTRACTIONS = {
+#     "hasnt": "have",
+#     "wouldnt": "would",
+#     "cant": "can",
+#     "havent": "have",
+#     "wont": "will",
+#     "didnt": None,
+#     "dont": None,
+#     "doesnt": None,
+#     "was": None,
+#     "were": None,
+#     "wasnt": None,
+#     "werent": None,
+#     "do": None,
+#     "about": None,
+#     "other": None,
+#     "something": None,
+#     "like": None,
+#     "thing": None,
+#     "use": None,
+#     "give": None,
+#     "take": None,
+#     "make": None,
+#     "what": None,
+#     "come": None,
+#     "find": None,
+#     "can": None,
+#     "how": None,
+#     "have": None,
+#     "would": None,
+#     "will": None,
+#     "not": None,
+# }
 
 
 def extract_main_definition_html(element):
@@ -100,7 +112,7 @@ def get_final_form(word):
     """
     if word in final_form_cache:
         return final_form_cache[word]
-    
+
     url = f"https://simple.wiktionary.org/wiki/{word}"
     try:
         response = requests.get(url)
@@ -146,7 +158,7 @@ def is_allowed_category(word):
     """
     if word in allowed_category_cache:
         return allowed_category_cache[word]
-    
+
     url = f"https://simple.wiktionary.org/wiki/{word}"
     try:
         response = requests.get(url)
@@ -171,7 +183,7 @@ def extract_definition(word):
     Fetches the Wiktionary page for a word and extracts its definition.
     If an italic candidate is found in the cleaned HTML, that candidate is used as a signal
     to discard the entry (for example, indicating a plural form) and returns an empty definition.
-    Otherwise, tokenizes the text, applies contraction rules, filters tokens,
+    Otherwise, tokenizes the text, applies contraction rules (NOW DISABLED), filters tokens,
     and rebuilds the definition.
     Returns the final definition as a lowercase string.
     """
@@ -182,7 +194,7 @@ def extract_definition(word):
         return ""
     if response.status_code != 200:
         return ""
-    
+
     soup = BeautifulSoup(response.text, "html.parser")
     ol = soup.find("ol")
     if not ol:
@@ -199,40 +211,50 @@ def extract_definition(word):
         else:
             clean_text = alt_text
         img.replace_with(clean_text)
-    
+
     main_html = extract_main_definition_html(element)
     cleaned_html_str = re.sub(r"\([^)]*\)", "", main_html)
     cleaned_soup = BeautifulSoup(cleaned_html_str, "html.parser")
-    
+
     # Check for an italic candidate.
     italic_candidate = cleaned_soup.find("i")
     if italic_candidate:
         candidate_text = italic_candidate.get_text(strip=True)
         if candidate_text and "?" not in candidate_text:
+            # Discard entry if italic candidate indicates a different form (like plural)
             return ""
-    
+
     full_text = cleaned_soup.get_text(separator=" ", strip=True)
     cleaned_text = re.sub(r"[^\w\s.]", "", full_text)
     cleaned_text = re.sub(r"\s+", " ", cleaned_text).strip()
     tokens = cleaned_text.split()
+
     prelim_filtered = []
     for token in tokens:
         token = token.strip(".")
         if len(token) == 0 or len(token) == 1 or any(ch.isdigit() for ch in token):
             continue
         lower_token = token.lower()
+        # MODIFICATION: The following block checking CONTRACTIONS is now effectively skipped
+        # because the CONTRACTIONS dictionary is empty.
         if lower_token in CONTRACTIONS:
             replacement = CONTRACTIONS[lower_token]
             if replacement is None:
-                continue
+                continue # This part won't be reached if CONTRACTIONS is empty
             else:
-                token = replacement
+                token = replacement # This part won't be reached if CONTRACTIONS is empty
+
+        # The original token (or potentially modified if CONTRACTIONS had entries) is added.
+        # Since CONTRACTIONS is empty, the original token passing length/digit checks is always added.
         prelim_filtered.append(token)
+
     allowed_words = []
     for token in prelim_filtered:
-        final = get_final_form(token)
-        if is_allowed_category(final):
+        final = get_final_form(token) # Checks lemma form
+        if is_allowed_category(final): # Checks if lemma is noun, verb, adj, proper noun
             allowed_words.append(final)
+
+    # Further filtering based on a small set of disallowed words and the entry word itself
     disallowed = {"be", "to", "if", word.lower()}
     unique_allowed = []
     seen = set()
@@ -242,7 +264,8 @@ def extract_definition(word):
             continue
         if lw not in seen:
             seen.add(lw)
-            unique_allowed.append(lw)
+            unique_allowed.append(lw) # Append the final form (lemma)
+
     final_definition = " ".join(unique_allowed)
     return final_definition
 
@@ -251,43 +274,84 @@ def process_entry(entry):
     Processes a single Wiktionary entry.
     Returns a tuple (entry, definition). If the entry is not allowed or yields an empty definition, returns None for the definition.
     """
+    # First check category for the original entry word itself
     if not is_allowed_category(entry):
+        debug_log(f"Discarding '{entry}' (original form not allowed category).")
         return entry, None
+
     definition = extract_definition(entry)
     if not definition:
+        # Definition might be empty due to italic check or no valid words remaining after filtering
+        debug_log(f"Discarding '{entry}' (yielded empty definition).")
         return entry, None
+
     return entry, definition
+
 
 def main():
     entries_file = "wiktionary_entries.txt"
     output_file = "extracted_definitions.txt"
-    
+
     if not os.path.exists(entries_file):
-        print(f"{entries_file} not found. Please ensure the file exists.")
+        print(f"Error: {entries_file} not found. Please ensure the file exists in the current directory.")
         return
-    
-    with open(entries_file, "r", encoding="utf-8") as f:
-        entries = [line.strip() for line in f if line.strip()]
-    print(f"Found {len(entries)} entries in {entries_file}.")
-    
+
+    try:
+        with open(entries_file, "r", encoding="utf-8") as f:
+            # Read entries, strip whitespace, ignore empty lines, and remove duplicates
+            raw_entries = [line.strip() for line in f if line.strip()]
+            entries = sorted(list(set(raw_entries))) # Use set to remove duplicates, then sort
+            print(f"Found {len(raw_entries)} lines, {len(entries)} unique entries in {entries_file}.")
+    except Exception as e:
+        print(f"Error reading {entries_file}: {e}")
+        return
+
     extracted_definitions = {}
+    discarded_count = 0 # Keep track of discarded entries
+
+    # Use ThreadPoolExecutor for parallel processing
+    # Adjust max_workers based on your system and network limits
     with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
-        futures = {executor.submit(process_entry, entry): entry for entry in entries}
-        for future in tqdm(concurrent.futures.as_completed(futures), total=len(entries), desc="Extracting definitions"):
+        # Submit all tasks
+        future_to_entry = {executor.submit(process_entry, entry): entry for entry in entries}
+
+        # Process results as they complete, with progress bar
+        for future in tqdm(concurrent.futures.as_completed(future_to_entry), total=len(entries), desc="Extracting definitions"):
+            entry = future_to_entry[future]
             try:
-                entry, definition = future.result()
-                if definition:
-                    extracted_definitions[entry] = definition
+                entry_result, definition_result = future.result()
+                if definition_result:
+                    extracted_definitions[entry_result] = definition_result
+                    debug_log(f"Successfully processed '{entry_result}'.")
                 else:
-                    print(f"Discarding '{entry}' (empty definition or not allowed).")
+                    # Entry was processed but discarded (not allowed category or empty def)
+                    discarded_count += 1
+                    # Optional: Log discarded entries if DEBUG is False but you still want this info
+                    # print(f"Discarding '{entry_result}' (reason determined in process_entry).")
             except Exception as e:
-                print(f"Error processing an entry: {e}")
-    
-    with open(output_file, "w", encoding="utf-8") as f:
-        for word, definition in extracted_definitions.items():
-            f.write(f"{word}: {definition}\n")
-    
-    print(f"Definitions saved to '{output_file}'.")
+                print(f"\nError processing entry '{entry}': {e}")
+                discarded_count += 1 # Count errors as discarded
+
+    print(f"\nProcessed {len(entries)} unique entries.")
+    print(f"Successfully extracted definitions for {len(extracted_definitions)} entries.")
+    print(f"Discarded {discarded_count} entries (includes errors, non-allowed categories, and empty definitions).")
+
+    # Write results to output file
+    try:
+        with open(output_file, "w", encoding="utf-8") as f:
+            # Sort results alphabetically by entry word before writing
+            for word in sorted(extracted_definitions.keys()):
+                f.write(f"{word}: {extracted_definitions[word]}\n")
+        print(f"Definitions saved to '{output_file}'.")
+    except Exception as e:
+        print(f"Error writing to {output_file}: {e}")
+
 
 if __name__ == "__main__":
+    # Optional: Add basic argument parsing if needed later
+    # import argparse
+    # parser = argparse.ArgumentParser(description="Extract Wiktionary definitions.")
+    # parser.add_argument("-d", "--debug", action="store_true", help="Enable debug logging.")
+    # args = parser.parse_args()
+    # DEBUG = args.debug
     main()
